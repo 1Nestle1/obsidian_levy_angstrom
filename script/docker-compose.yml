@@ -1,0 +1,31 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: searxng-redis
+    restart: unless-stopped
+    command: redis-server --save "" --appendonly no
+    networks:
+      - searxng-net
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    depends_on:
+      - redis
+    ports:
+      - "8080:8080"
+    networks:
+      - searxng-net
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      # For local use:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      # Optional: reduce noise in logs
+      - UWSGI_WORKERS=2
+      - UWSGI_THREADS=2
+
+networks:
+  searxng-net:
+    driver: bridge

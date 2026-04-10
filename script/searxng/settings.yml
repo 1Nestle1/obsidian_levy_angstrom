@@ -1,0 +1,72 @@
+use_default_settings: true
+
+general:
+  debug: false
+  instance_name: "Personal Research SearXNG"
+  
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+  formats:
+    - html
+    - json
+
+server:
+  secret_key: "XLQJ77nxAdilIbjexm2dV5wz"
+  limiter: false  # ← DISABLE RATE LIMITING
+  image_proxy: false
+  http_protocol_version: "1.1"
+  method: "GET"
+  
+ui:
+  static_use_hash: true
+  default_theme: simple
+  theme_args:
+    simple_style: dark
+
+# Disable all rate limiting
+outgoing:
+  request_timeout: 10.0
+  max_request_timeout: 15.0
+  pool_connections: 100
+  pool_maxsize: 10
+  enable_http2: false
+
+# Make sure limiter is disabled
+redis:
+  url: false
+
+enabled_plugins:
+  - 'Self Information'
+  - 'Tracker URL remover'
+
+engines:
+  - name: google
+    engine: google
+    shortcut: go
+    
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+    
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+    
+  - name: github
+    engine: github
+    shortcut: gh
+    
+  - name: stackoverflow
+    engine: stackoverflow
+    shortcut: st
+
+botdetection:
+  ip_lists:
+    pass_ip:
+      - 127.0.0.1
+      - ::1
+      # Docker Desktop / bridge networks often appear as these ranges:
+      - 172.16.0.0/12
+      - 192.168.0.0/16
