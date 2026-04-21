@@ -1,110 +1,131 @@
-"""Extract content from multiple sources."""
-import trafilatura
-import requests
-from typing import List, Dict, Optional
+"""Fetch + clean source pages with caching, retries, and quality scoring."""
+from __future__ import annotations
+
+import re
 from concurrent.futures import ThreadPoolExecutor
-from config import CODE_SOURCES
+from typing import Dict, List, Optional
+
+import requests
+import trafilatura
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from config import (
+    CACHE_DIR,
+    HTTP_BACKOFF,
+    HTTP_RETRIES,
+    HTTP_TIMEOUT,
+    MAX_EXTRACT_WORKERS,
+    MIN_SOURCE_CHARS,
+    SOURCE_CACHE_TTL,
+    TRUSTED_SOURCES,
+)
+from src.utils.cache import JSONCache
+
+_TITLE_RE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
+
+
+def _build_session() -> requests.Session:
+    retry = Retry(
+        total=HTTP_RETRIES,
+        backoff_factor=HTTP_BACKOFF,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+    )
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    session.headers.update({"User-Agent": "Mozilla/5.0 (ObsidianResearchBot)"})
+    return session
 
 
 class MultiSourceExtractor:
-    def __init__(self, max_workers: int = 5, timeout: int = 15):
+    def __init__(
+        self,
+        max_workers: int = MAX_EXTRACT_WORKERS,
+        timeout: int = HTTP_TIMEOUT,
+    ):
         self.max_workers = max_workers
         self.timeout = timeout
-    
+        self.session = _build_session()
+        self.cache = JSONCache(CACHE_DIR / "sources", ttl_seconds=SOURCE_CACHE_TTL)
+
     def extract_single(self, url: str) -> Optional[Dict]:
-        """Extract content from one URL."""
+        cached = self.cache.get(url)
+        if cached is not None:
+            print(f"  [cache] {url[:70]}")
+            return cached
+
         try:
-            print(f"  📥 {url[:60]}...")
-            
-            # Download with requests first (with timeout)
-            response = requests.get(
-                url,
-                timeout=self.timeout,
-                headers={'User-Agent': 'Mozilla/5.0 (Research Bot)'}
-            )
+            print(f"  [fetch] {url[:70]}")
+            response = self.session.get(url, timeout=self.timeout)
             response.raise_for_status()
-            downloaded = response.text
-            
-            # Extract text using trafilatura
-            text = trafilatura.extract(
-                downloaded,
-                include_comments=False,
-                include_tables=True,
-                favor_precision=True,
-                output_format='markdown'
-            )
-            
-            if not text or len(text) < 300:
-                print(f"  ⚠️  Content too short")
-                return None
-            
-            # Score quality
-            quality = 50
-            for trusted in CODE_SOURCES:
-                if trusted in url:
-                    quality += 30
-                    break
-            
-            if len(text) > 2000:
-                quality += 10
-            
-            if '```' in text or 'code>' in text:
-                quality += 5
-            
-            if quality < 40:
-                print(f"  ⚠️  Low quality ({quality}/100)")
-                return None
-            
-            print(f"  ✓ {len(text)} chars (quality: {quality}/100)")
-            
-            # Extract title from URL or content
-            title = url.split('//')[-1].split('/')[0]
-            if '<title>' in downloaded:
-                import re
-                title_match = re.search(r'<title>([^<]+)</title>', downloaded)
-                if title_match:
-                    title = title_match.group(1).strip()
-            
-            return {
-                'url': url,
-                'title': title,
-                'content': text,
-                'quality_score': quality,
-                'word_count': len(text.split())
-            }
-            
-        except requests.Timeout:
-            print(f"  ⏱️  Timeout")
-            return None
+            html = response.text
         except requests.RequestException as e:
-            print(f"  ❌ Request failed: {str(e)[:30]}")
+            print(f"  [fetch] failed: {str(e)[:80]}")
             return None
-        except Exception as e:
-            print(f"  ❌ Failed: {str(e)[:50]}")
+
+        text = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=True,
+            favor_precision=True,
+            output_format="markdown",
+        )
+
+        if not text or len(text) < MIN_SOURCE_CHARS:
+            print(f"  [extract] too short ({len(text) if text else 0} chars)")
             return None
-    
-    def extract_multiple(self, urls: List[str], top_n: int = 3) -> List[Dict]:
-        """Extract from multiple URLs in parallel."""
-        print(f"\n🔄 Extracting from {len(urls)} sources...")
-        
-        results = []
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            futures = [executor.submit(self.extract_single, url) for url in urls]
-            for future in futures:
-                result = future.result()
-                if result:
-                    results.append(result)
-        
+
+        title = _extract_title(html) or url.split("//")[-1].split("/")[0]
+        quality = _score_quality(url, text)
+
+        record = {
+            "url": url,
+            "title": title,
+            "content": text,
+            "quality_score": quality,
+            "word_count": len(text.split()),
+            "char_count": len(text),
+        }
+
+        self.cache.set(url, record)
+        return record
+
+    def extract_multiple(self, urls: List[str], top_n: int = 4) -> List[Dict]:
+        print(f"\n[extract] {len(urls)} urls, top_n={top_n}")
+
+        results: List[Dict] = []
+        with ThreadPoolExecutor(max_workers=self.max_workers) as pool:
+            for r in pool.map(self.extract_single, urls):
+                if r is not None:
+                    results.append(r)
+
         if not results:
-            print("\n⚠️  No content extracted from any source")
+            print("[extract] no sources passed quality bar")
             return []
-        
-        # Sort by quality
-        results.sort(key=lambda x: x['quality_score'], reverse=True)
-        top_results = results[:top_n]
-        
-        print(f"\n✓ Successfully extracted {len(top_results)} high-quality sources")
-        for r in top_results:
-            print(f"   - {r['title'][:50]} ({r['quality_score']}/100)")
-        
-        return top_results
+
+        results.sort(key=lambda x: x["quality_score"], reverse=True)
+        picks = results[:top_n]
+        for r in picks:
+            print(f"  [keep] {r['quality_score']}  {r['title'][:60]}")
+        return picks
+
+
+def _extract_title(html: str) -> Optional[str]:
+    m = _TITLE_RE.search(html)
+    return m.group(1).strip() if m else None
+
+
+def _score_quality(url: str, text: str) -> int:
+    score = 50
+    if any(trusted in url for trusted in TRUSTED_SOURCES):
+        score += 30
+    if len(text) > 2000:
+        score += 10
+    if len(text) > 6000:
+        score += 5
+    if "```" in text:
+        score += 5
+    return score
