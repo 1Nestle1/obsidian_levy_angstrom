@@ -20,6 +20,7 @@ class ThemeResult:
     proposed_new_concepts: List[str]
     confidence: float
     reasoning: str
+    template_family: str = "essay"  # "technical" or "essay"
 
     def to_dict(self) -> Dict:
         return {
@@ -30,7 +31,31 @@ class ThemeResult:
             "proposed_new_concepts": self.proposed_new_concepts,
             "confidence": self.confidence,
             "reasoning": self.reasoning,
+            "template_family": self.template_family,
         }
+
+
+_TECHNICAL_DOMAINS = {
+    "code", "programming", "software", "frontend", "backend", "web",
+    "javascript", "typescript", "python", "rust", "go", "java",
+    "react", "vue", "angular", "node", "devops", "cloud", "database",
+    "math", "mathematics", "algebra", "calculus", "statistics",
+    "machine learning", "ml", "ai", "deep learning", "algorithms",
+    "physics", "engineering", "cryptography", "security",
+}
+
+
+def _infer_template_family(domain: str, query: str) -> str:
+    """Heuristic: technical (code/math/sci) gets the big-DOC template,
+    everything else gets the lighter essay template."""
+    blob = f"{domain} {query}".lower()
+    for marker in _TECHNICAL_DOMAINS:
+        if marker in blob:
+            return "technical"
+    # Also treat any query with code-like tokens as technical.
+    if any(tok in query for tok in ("()", "{}", "::", "->", "=>")):
+        return "technical"
+    return "essay"
 
 
 _PROMPT_TEMPLATE = """You classify a research query for an Obsidian vault.
@@ -119,7 +144,7 @@ class ThemeDetector:
         if not isinstance(data, dict):
             return _fallback_result(query, candidates)
 
-        return _validate_result(data, candidates, domains)
+        return _validate_result(data, candidates, domains, query=query)
 
 
 def _bullet(items: List[str]) -> str:
@@ -135,6 +160,7 @@ def _fallback_result(query: str, candidates: List[str]) -> ThemeResult:
         proposed_new_concepts=[],
         confidence=0.0,
         reasoning="LLM unavailable or returned invalid JSON; using fallback.",
+        template_family=_infer_template_family("General", query),
     )
 
 
@@ -142,6 +168,7 @@ def _validate_result(
     data: Dict,
     candidates: List[str],
     existing_domains: List[str],
+    query: str = "",
 ) -> ThemeResult:
     candidate_set = set(candidates)
     linked = [x for x in data.get("linked_existing_nodes", []) if x in candidate_set]
@@ -164,4 +191,7 @@ def _validate_result(
         ],
         confidence=max(0.0, min(1.0, conf)),
         reasoning=str(data.get("reasoning") or "").strip(),
+        template_family=_infer_template_family(
+            domain, f"{query} {data.get('subtheme') or ''}"
+        ),
     )

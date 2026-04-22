@@ -24,6 +24,50 @@ from src.utils.cache import JSONCache
 
 _TITLE_RE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
 
+# Fenced code blocks from trafilatura's markdown output.
+# Captures optional language hint after the opening fence.
+_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*)\s*\n(.*?)```", re.DOTALL)
+# Markdown heading to use as context label for a code block.
+_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+
+_MAX_CODE_BLOCKS_PER_SOURCE = 3
+_MAX_CODE_BLOCK_CHARS = 1500
+_MIN_CODE_BLOCK_CHARS = 20
+
+
+def _harvest_code_blocks(markdown_text: str) -> List[Dict]:
+    """Pull fenced code blocks out of trafilatura markdown output.
+
+    Returns up to N blocks, each with language, code, and the nearest
+    preceding heading as context. No LLM involved — pure regex."""
+    if "```" not in markdown_text:
+        return []
+
+    headings: List[tuple[int, str]] = [
+        (m.start(), m.group(2).strip()) for m in _HEADING_RE.finditer(markdown_text)
+    ]
+
+    blocks: List[Dict] = []
+    for m in _FENCE_RE.finditer(markdown_text):
+        code = m.group(2).rstrip()
+        if len(code) < _MIN_CODE_BLOCK_CHARS:
+            continue
+        if len(code) > _MAX_CODE_BLOCK_CHARS:
+            code = code[:_MAX_CODE_BLOCK_CHARS].rstrip() + "\n# ... (truncated)"
+        lang = (m.group(1) or "").strip() or "text"
+        # Find most recent heading before this block.
+        pos = m.start()
+        context = ""
+        for h_pos, h_text in headings:
+            if h_pos < pos:
+                context = h_text
+            else:
+                break
+        blocks.append({"language": lang, "code": code, "context": context})
+        if len(blocks) >= _MAX_CODE_BLOCKS_PER_SOURCE:
+            break
+    return blocks
+
 
 def _build_session() -> requests.Session:
     retry = Retry(
@@ -80,6 +124,9 @@ class MultiSourceExtractor:
 
         title = _extract_title(html) or url.split("//")[-1].split("/")[0]
         quality = _score_quality(url, text)
+        code_blocks = _harvest_code_blocks(text)
+        if code_blocks:
+            print(f"  [code]  harvested {len(code_blocks)} block(s)")
 
         record = {
             "url": url,
@@ -88,6 +135,7 @@ class MultiSourceExtractor:
             "quality_score": quality,
             "word_count": len(text.split()),
             "char_count": len(text),
+            "code_blocks": code_blocks,
         }
 
         self.cache.set(url, record)

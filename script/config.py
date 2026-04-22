@@ -38,7 +38,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 #   cerebras   - https://api.cerebras.ai (needs CEREBRAS_API_KEY)
 #   github     - GitHub Models (needs GITHUB_TOKEN)
 #   custom     - any OpenAI-compat endpoint; set OPENAI_COMPAT_BASE_URL + OPENAI_COMPAT_API_KEY
-LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "ollama").lower()
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "groq").lower()
 
 # Per-provider defaults. Models chosen to favor the provider's free tier.
 PROVIDER_PROFILES = {
@@ -100,11 +100,14 @@ LLM_BASE_URL = _active["base_url"]
 LLM_API_KEY = os.environ.get(_active["api_key_env"], "") if _active["api_key_env"] else ""
 
 # Model settings per pass.
+# Pass 1 is intentionally tight: cloud providers bill per token and code
+# examples are now harvested via regex (no LLM), so Pass 1 only needs a
+# short JSON summary per source.
 EXTRACT_OPTIONS = {
     "temperature": 0.1,
     "top_p": 0.9,
     "num_ctx": 4096,
-    "num_predict": 1024,
+    "num_predict": 500,
     "repeat_penalty": 1.15,
 }
 
@@ -125,7 +128,8 @@ MAX_EXTRACT_WORKERS = 5
 # Minimum length for a source to be considered usable.
 MIN_SOURCE_CHARS = 400
 # Source text truncation before Pass 1 (chars, not tokens — approximate).
-MAX_SOURCE_CHARS_PER_PASS1 = 6000
+# Kept tight to stay well under 8B-model free-tier budgets.
+MAX_SOURCE_CHARS_PER_PASS1 = 3500
 
 # === SEARCH ===
 DEFAULT_MAX_RESULTS = 8

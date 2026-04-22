@@ -35,120 +35,144 @@ Output JSON with exactly these keys:
   "key_claims":    [{{"claim": "string", "quote": "short verbatim quote"}}],
   "definitions":   [{{"term": "string", "definition": "1-2 sentences"}}],
   "concepts":      ["Concept Name", "..."],
-  "code_examples": [{{"language": "python", "code": "string", "purpose": "string"}}],
-  "open_questions":["string", "..."],
-  "credibility_notes": "string"
+  "open_questions":["string", "..."]
 }}
 
 Rules:
 - Output ONLY JSON, no prose, no markdown fences.
+- Keep it compact: at most 4 key_claims, 3 definitions, 5 concepts, 3 open_questions.
 - `concepts` are generic/reusable names (e.g. "Backpropagation"), not full sentences.
-- Every claim must be supported by SOURCE_TEXT."""
+- Every claim must be supported by SOURCE_TEXT.
+- Do NOT output code examples — those are harvested separately."""
 
 
-_PASS2_PROMPT = """You are writing a personal Obsidian research pack.
+# ----------------------------- TECHNICAL TEMPLATE -----------------------------
+# Used for code, math, ML, engineering topics. One big DOC with numbered sections.
+# Examples section is LEFT EMPTY — we inject harvested code blocks deterministically
+# after the LLM returns.
+_PASS2_TECHNICAL = """You are writing a comprehensive Obsidian note on a technical topic.
+Output ONE markdown document. No prose before or after. Stop at `=== END ===`.
 
 TOPIC: {topic}
-TOPIC_FILENAME: {topic_filename}
 DOMAIN: {domain}
 SUBTHEME: {subtheme}
 ACCESS_DATE: {access_date}
 
-DOMAIN HUB LINK (use verbatim): [[MOC - {domain}]]
-
-EXISTING NODES TO LINK (use each at least once as [[title]]):
+EXISTING NOTES YOU CAN LINK (use `[[title]]` syntax when relevant):
 {existing_links_block}
 
-CONCEPT NAMES you MUST produce as their own 03_Concepts/ file blocks:
-{new_concepts_block}
-
-SOURCE SUMMARIES (JSON — ONLY factual ground truth; every citation must be one of these URLs):
+SOURCE SUMMARIES (JSON — only factual ground truth; do not invent facts):
 {summaries_json}
 
-OUTPUT RULES (READ CAREFULLY):
-1. Produce the files listed below, ONCE each, in this order. Do not repeat any file.
-2. Under each empty `##` heading, write real content drawn from SOURCE SUMMARIES.
-   - If there is genuinely nothing to say for a heading, delete that heading entirely. Do NOT leave it blank and do NOT write placeholder text.
-3. NEVER output text inside (parentheses-as-instructions) or <angle brackets>. Substitute real values.
-4. NEVER output the literal strings `Concept - X`, `Concept - ...`, `<title>`, `<URL>`, or `<Name>`.
-5. Wikilinks have the form [[Concept - RealName]] where RealName is a concept from CONCEPT NAMES above.
-6. Every `(Source: https://...)` citation URL must match a URL in SOURCE SUMMARIES.
-7. Each `## Key Claims` bullet must end with `(Source: https://...)`.
-8. End the entire response with the literal line `=== END ===` and output nothing after it.
+RULES:
+- Output ONE file, starting with the frontmatter below and ending with `=== END ===`.
+- Write like a textbook chapter: clear, detailed, comprehensive. Aim for 700-1200 words.
+- Use the exact section numbering and headers shown below.
+- In section 4 "Examples", write ONLY the single line `<!-- EXAMPLES_PLACEHOLDER -->` and nothing else. Code examples are inserted automatically later.
+- In section 7 "Sources", write ONLY the single line `<!-- SOURCES_PLACEHOLDER -->`. Sources are inserted automatically later.
+- Never output literal placeholders like `<title>`, `<URL>`, `<Name>`, or text in (parentheses-as-instructions).
+- When you reference a reusable concept, use `[[Concept Name]]` wikilinks; do not prefix with "Concept - ".
+- In "Key Claims" under bullets, end each bullet with `(Source: https://...)` where the URL matches a SOURCE SUMMARIES url.
 
-FILES TO PRODUCE (exact order, exact headers):
+BEGIN OUTPUT:
 
-=== FILE: 02_Research/Research - {topic_filename}.md ===
+=== FILE: 01_Topics/{topic_filename}.md ===
 ---
 topic: {topic}
 domain: {domain}
 subtheme: {subtheme}
 created: {access_date}
-tags: [research]
+tags: [topic, {family_tag}]
 ---
-# Research - {topic}
+# {topic}: A Comprehensive Guide
 
-## Abstract
+## 1. Overview
 
+(write 2-3 paragraph overview: what the topic is, why it matters, where it fits)
 
-## Key Claims
+## 2. Key Concepts
 
+(bullet list: each bullet is `- **Term**: 1-2 sentence definition`. 4-8 bullets.)
 
-## Open Questions
+## 3. How It Works
 
+(explain the mechanics in 2-4 paragraphs. Prose, not bullets.)
 
-## Takeaways / Next Actions
+## 4. Examples
 
+<!-- EXAMPLES_PLACEHOLDER -->
 
-## Linked Concepts
+## 5. Best Practices
 
+(bullet list of actionable guidelines, 4-7 bullets)
 
-=== FILE: 04_MOCs/MOC - {topic_filename}.md ===
----
-topic: {topic}
-tags: [moc]
----
-# MOC - {topic}
+## 6. Common Pitfalls
 
-- [[Research - {topic_filename}]]
-- [[Sources - {topic_filename}]]
-- Domain: [[MOC - {domain}]]
-- Concepts:
+(bullet list of mistakes to avoid, 3-6 bullets)
 
-=== FILE: 05_Sources/Sources - {topic_filename}.md ===
----
-topic: {topic}
-tags: [sources]
----
-# Sources - {topic}
+## 7. Sources
 
-
-{concept_file_skeletons}
+<!-- SOURCES_PLACEHOLDER -->
 
 === END ===
 """
 
 
-def _concept_skeleton(concept_name: str) -> str:
-    """Concept file skeleton — empty sections, no parenthetical hints."""
-    return f"""=== FILE: 03_Concepts/{concept_name}.md ===
+# ----------------------------- ESSAY TEMPLATE -----------------------------
+# Used for non-technical topics (history, philosophy, general knowledge).
+_PASS2_ESSAY = """You are writing a personal Obsidian note on a general-knowledge topic.
+Output ONE markdown document. Stop at `=== END ===`.
+
+TOPIC: {topic}
+DOMAIN: {domain}
+SUBTHEME: {subtheme}
+ACCESS_DATE: {access_date}
+
+EXISTING NOTES YOU CAN LINK (use `[[title]]` syntax when relevant):
+{existing_links_block}
+
+SOURCE SUMMARIES (JSON — only factual ground truth):
+{summaries_json}
+
+RULES:
+- Output ONE file only. 500-900 words.
+- In "Sources", write ONLY `<!-- SOURCES_PLACEHOLDER -->`. It is filled in automatically.
+- End every factual claim in "Key Points" with `(Source: https://...)` matching a URL from SOURCE SUMMARIES.
+- No literal `<title>`, `<URL>`, or parenthesized instructions.
+
+BEGIN OUTPUT:
+
+=== FILE: 01_Topics/{topic_filename}.md ===
 ---
-concept: {concept_name}
-tags: [concept]
+topic: {topic}
+domain: {domain}
+subtheme: {subtheme}
+created: {access_date}
+tags: [topic, {family_tag}]
 ---
-# {concept_name}
+# {topic}
 
-## Definition
+## Overview
 
+(2-3 paragraph summary)
 
-## Why It Matters
+## Background
 
+(context and history; 2-3 paragraphs)
 
-## Example
+## Key Points
 
+(bullet list of main claims, each ending with source citation)
+
+## Open Questions
+
+(bullet list of things left unresolved or debated)
 
 ## Sources
 
+<!-- SOURCES_PLACEHOLDER -->
+
+=== END ===
 """
 
 
@@ -158,8 +182,13 @@ class LLMNoteGenerator:
         ollama: Optional[OllamaClient] = None,
         extract_model: str = MODEL_EXTRACT,
         synthesize_model: str = MODEL_SYNTHESIZE,
+        synth_client: Optional[object] = None,
     ):
+        """Primary `ollama` client drives Pass 1 (extract).
+        `synth_client` drives Pass 2 (synthesize); defaults to the same client
+        for single-provider mode. Hybrid mode passes a different client here."""
         self.ollama = ollama or OllamaClient()
+        self.synth_client = synth_client or self.ollama
         self.extract_model = extract_model
         self.synthesize_model = synthesize_model
         self.cache = JSONCache(CACHE_DIR / "llm_pass1", ttl_seconds=LLM_CACHE_TTL)
@@ -215,44 +244,33 @@ class LLMNoteGenerator:
         summaries: List[Dict],
         existing_links: List[str],
         new_concepts: List[str],
+        template_family: str = "essay",
+        parent_topic: Optional[str] = None,  # reserved for slice C
     ) -> Optional[str]:
         access_date = datetime.now(timezone.utc).date().isoformat()
 
-        # Ensure every concept is prefixed "Concept - " for consistency.
-        normalized_concepts: List[str] = []
-        for c in new_concepts or []:
-            c = c.strip()
-            if not c:
-                continue
-            if not c.lower().startswith("concept - "):
-                c = f"Concept - {c}"
-            normalized_concepts.append(c)
-        if not normalized_concepts:
-            # Ensure at least one concept so the pack is meaningful.
-            normalized_concepts = [f"Concept - {topic.title()}"]
+        template = _PASS2_TECHNICAL if template_family == "technical" else _PASS2_ESSAY
+        family_tag = template_family  # "technical" or "essay"
 
-        concept_skeletons = "\n".join(_concept_skeleton(c) for c in normalized_concepts)
-
-        prompt = _PASS2_PROMPT.format(
+        prompt = template.format(
             topic=topic,
             topic_filename=topic_filename,
             domain=domain,
             subtheme=subtheme,
             access_date=access_date,
+            family_tag=family_tag,
             existing_links_block=_bullet(existing_links) or "(none)",
-            new_concepts_block=_bullet(normalized_concepts),
             summaries_json=json.dumps(summaries, indent=2, ensure_ascii=False),
-            concept_file_skeletons=concept_skeletons,
         )
 
         try:
-            return self.ollama.generate(
+            return self.synth_client.generate(
                 self.synthesize_model,
                 prompt,
                 options=SYNTHESIZE_OPTIONS,
                 stop=["=== END ==="],
             )
-        except OllamaError as e:
+        except Exception as e:  # noqa: BLE001 — ollama + cloud clients raise different errors
             print(f"[pass2] LLM error: {e}")
             return None
 
