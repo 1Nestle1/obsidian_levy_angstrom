@@ -79,6 +79,7 @@ BEGIN OUTPUT:
 === FILE: 01_Topics/{topic_filename}.md ===
 ---
 topic: {topic}
+parent: "[[{parent_link}]]"
 domain: {domain}
 subtheme: {subtheme}
 created: {access_date}
@@ -145,6 +146,7 @@ BEGIN OUTPUT:
 === FILE: 01_Topics/{topic_filename}.md ===
 ---
 topic: {topic}
+parent: "[[{parent_link}]]"
 domain: {domain}
 subtheme: {subtheme}
 created: {access_date}
@@ -245,12 +247,13 @@ class LLMNoteGenerator:
         existing_links: List[str],
         new_concepts: List[str],
         template_family: str = "essay",
-        parent_topic: Optional[str] = None,  # reserved for slice C
+        parent_topic: Optional[str] = None,
     ) -> Optional[str]:
         access_date = datetime.now(timezone.utc).date().isoformat()
 
         template = _PASS2_TECHNICAL if template_family == "technical" else _PASS2_ESSAY
-        family_tag = template_family  # "technical" or "essay"
+        family_tag = template_family
+        parent_link = parent_topic or f"MOC - {domain}"
 
         prompt = template.format(
             topic=topic,
@@ -259,6 +262,7 @@ class LLMNoteGenerator:
             subtheme=subtheme,
             access_date=access_date,
             family_tag=family_tag,
+            parent_link=parent_link,
             existing_links_block=_bullet(existing_links) or "(none)",
             summaries_json=json.dumps(summaries, indent=2, ensure_ascii=False),
         )

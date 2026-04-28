@@ -21,6 +21,7 @@ class ThemeResult:
     confidence: float
     reasoning: str
     template_family: str = "essay"  # "technical" or "essay"
+    parent_topic: Optional[str] = None  # broader topic, e.g. "React" for "React Hooks"
 
     def to_dict(self) -> Dict:
         return {
@@ -32,6 +33,7 @@ class ThemeResult:
             "confidence": self.confidence,
             "reasoning": self.reasoning,
             "template_family": self.template_family,
+            "parent_topic": self.parent_topic,
         }
 
 
@@ -65,6 +67,9 @@ QUERY: {query}
 EXISTING DOMAINS (MOCs already in vault):
 {domains_block}
 
+EXISTING TOPICS (you may suggest one of these as parent_topic):
+{topics_block}
+
 CANDIDATE EXISTING NODES (top matches by similarity — you may link these):
 {candidates_block}
 
@@ -73,8 +78,9 @@ Output JSON only, no prose, no markdown fences:
   "domain": "one of the existing MOC names above OR a short new domain name",
   "domain_is_new": true | false,
   "subtheme": "2-4 word phrase, e.g. 'Linear Algebra'",
+  "parent_topic": "name of a BROADER topic that subsumes the query (e.g. 'React' for query 'React Hooks'), or null if the query is itself a top-level topic",
   "linked_existing_nodes": ["exact title from CANDIDATE list, verbatim, or empty list"],
-  "proposed_new_concepts": ["Concept - X", "..."],
+  "proposed_new_concepts": ["short concept name", "..."],
   "confidence": 0.0,
   "reasoning": "one short sentence"
 }}
@@ -82,7 +88,8 @@ Output JSON only, no prose, no markdown fences:
 HARD RULES:
 - linked_existing_nodes entries MUST appear verbatim in the CANDIDATE list above. Never invent.
 - If domain matches no existing MOC, set domain_is_new=true with a short new name (1-2 words).
-- proposed_new_concepts use the form "Concept - X" with a capitalized topic name.
+- parent_topic is a BROADER concept than the query. If query is "React Hooks", parent_topic is "React". If query is itself top-level (e.g. "React"), parent_topic is null.
+- proposed_new_concepts are short atomic names (e.g. "useEffect", "useState") — leaves of the topic tree, NOT broader concepts.
 - confidence is a float between 0 and 1."""
 
 
@@ -126,10 +133,12 @@ class ThemeDetector:
     def detect(self, query: str) -> ThemeResult:
         domains = self.vault.domain_titles()
         candidates = self._rank_candidates(query)
+        topic_titles = [n.filename_stem for n in self.vault.topics]
 
         prompt = _PROMPT_TEMPLATE.format(
             query=query,
             domains_block=_bullet(domains) or "(none yet — suggest a new domain)",
+            topics_block=_bullet(topic_titles) or "(none yet)",
             candidates_block=_bullet(candidates) or "(vault is empty)",
         )
 
@@ -181,6 +190,11 @@ def _validate_result(
     except (TypeError, ValueError):
         conf = 0.0
 
+    parent = data.get("parent_topic")
+    parent_str = str(parent).strip() if parent else None
+    if parent_str and parent_str.lower() in {"null", "none", ""}:
+        parent_str = None
+
     return ThemeResult(
         domain=domain,
         domain_is_new=domain_is_new,
@@ -194,4 +208,5 @@ def _validate_result(
         template_family=_infer_template_family(
             domain, f"{query} {data.get('subtheme') or ''}"
         ),
+        parent_topic=parent_str,
     )

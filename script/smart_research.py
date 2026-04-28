@@ -36,6 +36,14 @@ from src.modules.openai_compat_client import LLMError
 from src.modules.pack_parser import parse as parse_pack
 from src.modules.pack_parser import validate_pack, write_pack
 from src.modules.search import SearchClient
+from src.modules.stub_writer import (
+    append_child_link,
+    find_definition,
+    link_root_topic_in_moc,
+    rank_concepts_by_mentions,
+    write_concept_stub,
+    write_parent_topic_stub,
+)
 from src.modules.theme_detector import ThemeDetector
 from src.modules.vault_index import build_index, ensure_vault_structure
 from src.utils.filenames import sanitize_filename
@@ -56,6 +64,10 @@ def run(
     provider: str | None = None,
     extract_provider: str | None = None,
     ask_hybrid: bool = False,
+    parent_override: str | None = None,
+    no_parent: bool = False,
+    max_stubs: int = 5,
+    pause_pick_sources: bool = False,
 ) -> int:
     banner(f"RESEARCH: {query}")
 
@@ -137,6 +149,36 @@ def run(
         return 2
     print(f"  {len(results)} results")
 
+    # --- Optional pause: let an external driver curate the URL list ---
+    if pause_pick_sources:
+        print("[pause:pick-sources]"); sys.stdout.flush()
+        print(json.dumps({"results": results}, ensure_ascii=False)); sys.stdout.flush()
+        print("[/pause:pick-sources]"); sys.stdout.flush()
+        try:
+            reply_line = sys.stdin.readline()
+        except Exception as e:  # noqa: BLE001
+            print(f"  [abort] could not read pick-sources reply: {e}")
+            return 2
+        if not reply_line:
+            print("  [abort] no pick-sources reply (stdin closed)")
+            return 2
+        try:
+            reply = json.loads(reply_line.strip() or "{}")
+        except json.JSONDecodeError as e:
+            print(f"  [abort] bad pick-sources reply JSON: {e}")
+            return 2
+        kept_urls = reply.get("urls") or []
+        if not kept_urls:
+            print("  [abort] no sources selected")
+            return 2
+        url_to_result = {r["url"]: r for r in results}
+        results = [url_to_result[u] for u in kept_urls if u in url_to_result]
+        if not results:
+            print("  [abort] reply URLs did not match any search result")
+            return 2
+        top_sources = len(results)
+        print(f"  user kept {len(results)} source(s)")
+
     # --- Step 3: extract sources ---
     print("\n[step 3] Extracting sources")
     extractor = MultiSourceExtractor()
@@ -168,6 +210,14 @@ def run(
     topic_filename = sanitize_filename(display_title)
     existing_vault_titles = {n.filename_stem for n in vault.all_notes}
 
+    # Resolve parent topic (CLI override > theme detector > none).
+    if no_parent:
+        effective_parent = None
+    else:
+        effective_parent = parent_override or theme.parent_topic
+    if effective_parent:
+        print(f"  parent topic: {effective_parent}")
+
     raw = generator.synthesize_pack(
         topic=display_title,
         topic_filename=topic_filename,
@@ -177,6 +227,7 @@ def run(
         existing_links=theme.linked_existing_nodes,
         new_concepts=theme.proposed_new_concepts,
         template_family=theme.template_family,
+        parent_topic=effective_parent,
     )
     if not raw:
         print("  [abort] synthesis failed")
@@ -221,8 +272,32 @@ def run(
     for rel, reason in report.skipped:
         print(f"  [skip] {rel}: {reason}")
 
-    # Link the new hub into its domain MOC.
-    _link_topic_in_domain_moc(vault_root, theme.domain, topic_filename, theme.subtheme)
+    # --- Step 8: Build the topic tree (parent + concept stubs + MOC) ---
+    print("\n[step 8] Wiring topic tree")
+    children = _wire_topic_tree(
+        vault_root=vault_root,
+        topic_filename=topic_filename,
+        domain=theme.domain,
+        subtheme=theme.subtheme,
+        parent_topic=effective_parent,
+        proposed_concepts=theme.proposed_new_concepts,
+        summaries=summaries,
+        sources=sources,
+        max_stubs=max_stubs,
+    )
+
+    # Emit a structured cascade-context block. The web layer parses this to drive
+    # the post-run "research children/siblings" picker (D-5).
+    cascade_ctx = {
+        "topic": topic_filename,
+        "topic_display": query,
+        "domain": theme.domain,
+        "parent": effective_parent,
+        "children": children,
+    }
+    print("[cascade-context]"); sys.stdout.flush()
+    print(json.dumps(cascade_ctx, ensure_ascii=False)); sys.stdout.flush()
+    print("[/cascade-context]"); sys.stdout.flush()
 
     _save_run_manifest(query, theme, sources, summaries, pack, report, resolved)
 
@@ -331,30 +406,73 @@ def _display_title(query: str) -> str:
     return q.title()
 
 
-def _link_topic_in_domain_moc(
-    vault_root: Path, domain: str, topic_filename: str, subtheme: str
-) -> None:
-    """Add `- [[Topic]]` to MOC - {Domain}.md. Creates the file if missing. Idempotent."""
-    moc_path = vault_root / "04_MOCs" / f"MOC - {sanitize_filename(domain)}.md"
-    link_line = f"- [[{topic_filename}]]"
-    if subtheme:
-        link_line += f" — {subtheme}"
+def _wire_topic_tree(
+    vault_root: Path,
+    topic_filename: str,
+    domain: str,
+    subtheme: str,
+    parent_topic: str | None,
+    proposed_concepts: list,
+    summaries: list,
+    sources: list,
+    max_stubs: int,
+) -> list:
+    """Build the parent → topic → concept-leaf tree. All operations idempotent.
 
-    if moc_path.exists():
-        existing = moc_path.read_text(encoding="utf-8")
-        if f"[[{topic_filename}]]" in existing:
-            return
-        new_content = existing.rstrip() + "\n" + link_line + "\n"
-    else:
-        moc_path.parent.mkdir(parents=True, exist_ok=True)
-        new_content = (
-            f"---\ndomain: {domain}\ntags: [moc]\n---\n"
-            f"# MOC - {domain}\n\n"
-            f"Topics in this domain:\n\n"
-            f"{link_line}\n"
+    1. Concept leaves (03_Concepts/) — top-N by mention frequency, capped at max_stubs.
+    2. Parent topic stub (01_Topics/) — created if missing; topic added to its Children.
+    3. Domain MOC (04_MOCs/) — only ROOT topics get listed (no parent_topic).
+
+    Returns the ranked children list (concept names actually created/linked).
+    """
+    # 1. Concept leaves
+    ranked = rank_concepts_by_mentions(summaries, proposed_concepts, max_n=max_stubs)
+    if ranked:
+        print(f"  concept stubs ({len(ranked)}): {', '.join(ranked)}")
+    primary_source = sources[0] if sources else None
+    for name in ranked:
+        defn = find_definition(summaries, name)
+        path = write_concept_stub(
+            vault_root,
+            name=name,
+            definition=defn,
+            parent_topic=topic_filename,
+            domain=domain,
+            source_url=primary_source["url"] if primary_source else "",
+            source_title=primary_source.get("title", "") if primary_source else "",
         )
-    moc_path.write_text(new_content, encoding="utf-8")
-    print(f"  linked in {moc_path.relative_to(vault_root)}")
+        if path:
+            print(f"  + stub {path.relative_to(vault_root)}")
+
+    # Add Children section + concept links to the hub itself.
+    hub_path = vault_root / "01_Topics" / f"{topic_filename}.md"
+    for name in ranked:
+        append_child_link(hub_path, name, subtheme="")
+
+    # 2. Parent topic stub + child link
+    if parent_topic:
+        parent_filename = sanitize_filename(parent_topic)
+        parent_path = vault_root / "01_Topics" / f"{parent_filename}.md"
+        created = write_parent_topic_stub(
+            vault_root, name=parent_topic, domain=domain,
+            grandparent=f"MOC - {domain}",
+        )
+        if created:
+            print(f"  + parent stub {created.relative_to(vault_root)}")
+        if append_child_link(parent_path, topic_filename, subtheme=subtheme):
+            print(f"  linked into parent {parent_path.relative_to(vault_root)}")
+
+        # Domain MOC lists the parent (root), not this topic.
+        moc = link_root_topic_in_moc(vault_root, domain, parent_topic, subtheme="")
+        if moc:
+            print(f"  ensured {moc.relative_to(vault_root)}")
+    else:
+        # No parent → this topic IS the root in its domain.
+        moc = link_root_topic_in_moc(vault_root, domain, topic_filename, subtheme=subtheme)
+        if moc:
+            print(f"  ensured {moc.relative_to(vault_root)}")
+
+    return ranked
 
 
 def _dump_debug_output(query: str, raw: str) -> None:
@@ -421,6 +539,29 @@ def main(argv: List[str] | None = None) -> int:
         action="store_true",
         help="Prompt at runtime whether to use a different provider for extract.",
     )
+    parser.add_argument(
+        "--parent",
+        default=None,
+        help="Force a parent topic (e.g. --parent 'React' for query 'React Hooks'). "
+             "Overrides automatic detection.",
+    )
+    parser.add_argument(
+        "--no-parent",
+        action="store_true",
+        help="Treat this topic as a root (no parent) regardless of detection.",
+    )
+    parser.add_argument(
+        "--max-stubs",
+        type=int,
+        default=5,
+        help="Max number of concept-leaf stubs to create per run (default: 5).",
+    )
+    parser.add_argument(
+        "--pause-pick-sources",
+        action="store_true",
+        help="After step 2, emit search results as JSON on stdout and block on stdin "
+             "for a curated URL list. Used by the web UI to gate Pass-1 LLM costs.",
+    )
     args = parser.parse_args(argv)
 
     query = " ".join(args.query).strip()
@@ -450,6 +591,10 @@ def main(argv: List[str] | None = None) -> int:
         provider=provider,
         extract_provider=args.extract_provider,
         ask_hybrid=args.hybrid,
+        parent_override=args.parent,
+        no_parent=args.no_parent,
+        max_stubs=args.max_stubs,
+        pause_pick_sources=args.pause_pick_sources,
     )
 
 

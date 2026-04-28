@@ -1,6 +1,7 @@
 """Fetch + clean source pages with caching, retries, and quality scoring."""
 from __future__ import annotations
 
+import html
 import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, List, Optional
@@ -24,38 +25,132 @@ from src.utils.cache import JSONCache
 
 _TITLE_RE = re.compile(r"<title[^>]*>([^<]+)</title>", re.IGNORECASE)
 
-# Fenced code blocks from trafilatura's markdown output.
-# Captures optional language hint after the opening fence.
-_FENCE_RE = re.compile(r"```([a-zA-Z0-9_+-]*)\s*\n(.*?)```", re.DOTALL)
-# Markdown heading to use as context label for a code block.
-_HEADING_RE = re.compile(r"^(#{1,6})\s+(.+?)\s*$", re.MULTILINE)
+# --- Code-block harvesting from raw HTML (preserves language hints) ---
+# Pages encode language as <code class="language-jsx"> or class="hljs-python" or
+# class="lang-go" — trafilatura's markdown output drops these, so we parse HTML.
+_HTML_CODE_RE = re.compile(
+    r"<pre[^>]*>\s*<code([^>]*)>(.+?)</code>\s*</pre>",
+    re.DOTALL | re.IGNORECASE,
+)
+_HTML_HEADING_RE = re.compile(
+    r"<h([1-6])[^>]*>(.+?)</h\1>", re.DOTALL | re.IGNORECASE,
+)
+_HTML_CLASS_RE = re.compile(r'class\s*=\s*"([^"]+)"', re.IGNORECASE)
+_HTML_TAG_STRIP_RE = re.compile(r"<[^>]+>")
+_LANG_CLASS_RE = re.compile(
+    r"\b(?:language|lang|hljs|highlight|brush)[-:]([a-z0-9+#]+)", re.IGNORECASE,
+)
 
 _MAX_CODE_BLOCKS_PER_SOURCE = 3
 _MAX_CODE_BLOCK_CHARS = 1500
-_MIN_CODE_BLOCK_CHARS = 20
+_MIN_CODE_BLOCK_CHARS = 30
+
+# Map common short hints to canonical Obsidian-friendly fence labels.
+_LANG_ALIASES = {
+    "js": "javascript", "ts": "typescript", "py": "python",
+    "rb": "ruby", "sh": "bash", "shell": "bash", "zsh": "bash",
+    "yml": "yaml", "md": "markdown", "tex": "latex",
+    "c++": "cpp", "cs": "csharp", "objc": "objectivec",
+    "html5": "html", "xml": "xml",
+}
 
 
-def _harvest_code_blocks(markdown_text: str) -> List[Dict]:
-    """Pull fenced code blocks out of trafilatura markdown output.
+def _normalize_lang(name: str) -> str:
+    name = (name or "").strip().lower()
+    return _LANG_ALIASES.get(name, name)
 
-    Returns up to N blocks, each with language, code, and the nearest
-    preceding heading as context. No LLM involved — pure regex."""
-    if "```" not in markdown_text:
+
+def _detect_lang_from_class(class_attr: str) -> Optional[str]:
+    if not class_attr:
+        return None
+    for token in class_attr.split():
+        m = _LANG_CLASS_RE.match(token)
+        if m:
+            return _normalize_lang(m.group(1))
+    return None
+
+
+def _detect_lang_from_content(code: str) -> str:
+    """Heuristic content-based language detection. Order matters — most
+    specific rules first."""
+    s = code.strip()
+    head = s[:600]
+
+    # JSX / React (must beat plain JS)
+    if re.search(r"\bimport\s+React\b|<[A-Z][A-Za-z0-9]*\s|<\/[A-Z]", head):
+        return "jsx"
+    # TypeScript
+    if re.search(r"\binterface\s+\w+|:\s*\w+(\[\])?\s*[=;)]|<\w+>\s*\(", head):
+        return "typescript"
+    # Plain JavaScript
+    if re.search(r"=>|\bconst\s+\w+\s*=|\blet\s+\w+\s*=|\brequire\(", head):
+        return "javascript"
+    # Python
+    if re.search(r"^\s*def\s+\w+\(|^\s*from\s+\w+\s+import|\bprint\(", head, re.MULTILINE):
+        return "python"
+    # Go
+    if re.search(r"^\s*package\s+\w+|^\s*func\s+\w+\(", head, re.MULTILINE):
+        return "go"
+    # Rust
+    if re.search(r"^\s*fn\s+\w+\(|let\s+mut\s+\w+", head, re.MULTILINE):
+        return "rust"
+    # Java
+    if re.search(r"public\s+class\s+\w+|System\.out\.println", head):
+        return "java"
+    # C / C++
+    if re.search(r"#include\s*<|int\s+main\s*\(", head):
+        return "cpp"
+    # SQL
+    if re.search(r"\b(SELECT|INSERT|UPDATE|DELETE|CREATE TABLE)\b", head, re.IGNORECASE):
+        return "sql"
+    # HTML
+    if re.search(r"<!DOCTYPE|<html|<body", head, re.IGNORECASE):
+        return "html"
+    # CSS
+    if re.search(r"^\s*[.#]?[a-zA-Z][\w-]*\s*\{[^}]*:\s*[^;]+;", head, re.MULTILINE):
+        return "css"
+    # Bash / shell
+    if re.search(r"^\s*(\$|#!\s*/|sudo |npm |pip |git )", head, re.MULTILINE):
+        return "bash"
+    # JSON
+    if re.match(r"\s*[{\[]", s) and re.search(r'"\w+"\s*:', head):
+        return "json"
+    # LaTeX / math
+    if re.search(r"\\frac|\\begin\{|\$\$", head):
+        return "latex"
+    return "text"
+
+
+def _strip_html_to_text(s: str) -> str:
+    return html.unescape(_HTML_TAG_STRIP_RE.sub("", s)).strip()
+
+
+def _harvest_code_blocks(html_text: str) -> List[Dict]:
+    """Parse raw HTML for <pre><code>...</code></pre> blocks. Extracts language
+    from class attribute when present; falls back to content heuristics.
+    Tags each block with the nearest preceding <h1>-<h6> as context."""
+    if "<code" not in html_text.lower():
         return []
 
     headings: List[tuple[int, str]] = [
-        (m.start(), m.group(2).strip()) for m in _HEADING_RE.finditer(markdown_text)
+        (m.start(), _strip_html_to_text(m.group(2)))
+        for m in _HTML_HEADING_RE.finditer(html_text)
     ]
 
     blocks: List[Dict] = []
-    for m in _FENCE_RE.finditer(markdown_text):
-        code = m.group(2).rstrip()
+    for m in _HTML_CODE_RE.finditer(html_text):
+        attrs, raw = m.group(1), m.group(2)
+        code = html.unescape(_HTML_TAG_STRIP_RE.sub("", raw)).rstrip()
         if len(code) < _MIN_CODE_BLOCK_CHARS:
             continue
         if len(code) > _MAX_CODE_BLOCK_CHARS:
             code = code[:_MAX_CODE_BLOCK_CHARS].rstrip() + "\n# ... (truncated)"
-        lang = (m.group(1) or "").strip() or "text"
-        # Find most recent heading before this block.
+
+        cls_match = _HTML_CLASS_RE.search(attrs or "")
+        lang = _detect_lang_from_class(cls_match.group(1)) if cls_match else None
+        if not lang or lang == "text":
+            lang = _detect_lang_from_content(code)
+
         pos = m.start()
         context = ""
         for h_pos, h_text in headings:
@@ -63,6 +158,7 @@ def _harvest_code_blocks(markdown_text: str) -> List[Dict]:
                 context = h_text
             else:
                 break
+
         blocks.append({"language": lang, "code": code, "context": context})
         if len(blocks) >= _MAX_CODE_BLOCKS_PER_SOURCE:
             break
@@ -124,9 +220,12 @@ class MultiSourceExtractor:
 
         title = _extract_title(html) or url.split("//")[-1].split("/")[0]
         quality = _score_quality(url, text)
-        code_blocks = _harvest_code_blocks(text)
+        # Harvest code from raw HTML (preserves language attribute) and fall
+        # back to detection from content for unlabelled blocks.
+        code_blocks = _harvest_code_blocks(html)
         if code_blocks:
-            print(f"  [code]  harvested {len(code_blocks)} block(s)")
+            langs = ", ".join(b["language"] for b in code_blocks)
+            print(f"  [code]  harvested {len(code_blocks)} block(s) [{langs}]")
 
         record = {
             "url": url,

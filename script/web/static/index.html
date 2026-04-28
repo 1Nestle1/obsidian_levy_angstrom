@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Obsidian Research Pipeline</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">●</span>
+      <span class="title">Research Pipeline</span>
+      <span class="subtitle" id="vault-path">vault: …</span>
+    </div>
+    <button id="refresh-providers" class="ghost">refresh providers</button>
+  </header>
+
+  <section class="provider-strip" id="provider-strip">
+    <div class="loading">Probing providers…</div>
+  </section>
+
+  <main class="content">
+    <section class="mode-toggle">
+      <button id="mode-single" class="mode-btn active" data-mode="single">single</button>
+      <button id="mode-mass"   class="mode-btn"        data-mode="mass">mass</button>
+    </section>
+
+    <section class="query-bar" id="query-bar-single">
+      <input id="query" type="text" placeholder="Type a research topic, e.g. React Hooks" />
+      <button id="research-btn" class="primary" disabled>Research →</button>
+      <button id="cancel-btn" class="ghost" disabled>Cancel</button>
+    </section>
+
+    <section class="query-bar mass" id="query-bar-mass" hidden>
+      <textarea id="query-mass" rows="6"
+                placeholder="One topic per line&#10;React Hooks&#10;Vue Composition API&#10;Angular Signals"></textarea>
+      <div class="mass-actions">
+        <button id="queue-all-btn" class="primary" disabled>Queue all (0)</button>
+      </div>
+    </section>
+
+    <section class="run-options" id="run-options">
+      <label class="opt">
+        <input type="checkbox" id="opt-pause-pick" checked />
+        <span>pick sources before extract</span>
+      </label>
+      <label class="opt">
+        <input type="checkbox" id="opt-dry-run" />
+        <span>dry run (search only, no LLM)</span>
+      </label>
+      <label class="opt">
+        <input type="checkbox" id="opt-no-parent" />
+        <span>no parent (root topic)</span>
+      </label>
+      <label class="opt">
+        <input type="checkbox" id="opt-cascade-picker" checked />
+        <span>cascade picker after run</span>
+      </label>
+      <label class="opt opt-num">
+        <span>cascade depth</span>
+        <input type="number" id="opt-cascade-depth" min="0" max="3" value="0" />
+      </label>
+      <label class="opt opt-num">
+        <span>max stubs</span>
+        <input type="number" id="opt-max-stubs" min="0" max="20" placeholder="5" />
+      </label>
+      <label class="opt opt-num">
+        <span>top sources</span>
+        <input type="number" id="opt-top-sources" min="1" max="20" placeholder="5" />
+      </label>
+      <label class="opt opt-num">
+        <span>parallel</span>
+        <input type="number" id="opt-concurrency" min="1" max="4" value="1" />
+      </label>
+    </section>
+
+    <section class="queue-panel" id="queue-panel" hidden>
+      <div class="queue-header">
+        <span class="queue-title">Queue</span>
+        <span class="queue-meta" id="queue-meta"></span>
+        <button id="queue-clear" class="ghost">clear pending</button>
+      </div>
+      <ul class="queue-list" id="queue-list"></ul>
+    </section>
+
+    <ol class="step-strip" id="step-strip"></ol>
+
+    <section class="picker" id="picker" hidden>
+      <div class="picker-header">
+        <span class="picker-title">Pick sources to extract</span>
+        <span class="picker-meta" id="picker-meta">0 selected</span>
+        <button id="picker-all" class="ghost">Select all</button>
+        <button id="picker-none" class="ghost">Deselect all</button>
+        <button id="picker-go" class="primary">Continue</button>
+      </div>
+      <div class="picker-list" id="picker-list"></div>
+    </section>
+
+    <section class="cascade-picker" id="cascade-picker" hidden>
+      <div class="picker-header">
+        <span class="picker-title">Cascade research?</span>
+        <span class="picker-meta" id="cascade-meta">0 selected</span>
+        <button id="cascade-skip" class="ghost">Skip</button>
+        <button id="cascade-go"   class="primary">Cascade selected</button>
+      </div>
+      <div class="cascade-group">
+        <div class="cascade-group-title">
+          Children <span id="cascade-children-count"></span>
+          <span class="cascade-hint">stubs from this run — research as topics under <code id="cascade-parent-label"></code></span>
+        </div>
+        <div class="cascade-list" id="cascade-children-list"></div>
+      </div>
+      <div class="cascade-group">
+        <div class="cascade-group-title">
+          Siblings <span id="cascade-siblings-count"></span>
+          <span class="cascade-hint">peers under the same parent — research as siblings</span>
+        </div>
+        <div class="cascade-list" id="cascade-siblings-list"></div>
+      </div>
+    </section>
+
+    <section class="log-panel" id="log-panel">
+      <div class="log-header">
+        <span id="log-title">log</span>
+        <span id="log-meta" class="log-meta"></span>
+        <button id="log-clear" class="ghost">clear</button>
+      </div>
+      <pre id="log" class="log"></pre>
+    </section>
+  </main>
+
+  <footer class="statusline">
+    <span id="status">idle</span>
+    <span id="selected-provider"></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
