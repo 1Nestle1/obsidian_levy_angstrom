@@ -3,7 +3,7 @@ Extract key concepts from content.
 """
 import re
 from typing import List, Dict
-from script.config import CONCEPT_RELATIONSHIPS
+from config import CONCEPT_RELATIONSHIPS
 
 
 class ConceptExtractor:
